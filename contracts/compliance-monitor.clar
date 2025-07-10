@@ -66,6 +66,64 @@
 )
 
 (define-data-var next-requirement-id uint u1)
+(define-data-var next-audit-id uint u1)
+
+(define-constant action-type-adverse-event-reported u1)
+(define-constant action-type-adverse-event-resolved u2)
+(define-constant action-type-deviation-reported u3)
+(define-constant action-type-deviation-corrected u4)
+(define-constant action-type-requirement-created u5)
+(define-constant action-type-requirement-completed u6)
+(define-constant action-type-score-updated u7)
+(define-constant action-type-compliance-changed u8)
+
+(define-map audit-trail
+  { audit-id: uint }
+  {
+    trial-id: uint,
+    action-type: uint,
+    actor: principal,
+    target-entity-id: (optional uint),
+    timestamp: uint,
+    block-height: uint,
+    previous-state: (optional (string-ascii 500)),
+    new-state: (optional (string-ascii 500)),
+    reason: (optional (string-ascii 200)),
+    severity: (optional uint),
+    validated: bool,
+    validator: (optional principal),
+    validation-timestamp: (optional uint)
+  }
+)
+
+(define-map trial-audit-summaries
+  { trial-id: uint }
+  {
+    total-actions: uint,
+    last-action-date: uint,
+    last-compliance-change: uint,
+    critical-actions-count: uint,
+    validation-rate: uint,
+    audit-score: uint
+  }
+)
+
+(define-map audit-queries
+  { query-id: uint }
+  {
+    trial-id: uint,
+    requester: principal,
+    query-type: uint,
+    date-range-start: uint,
+    date-range-end: uint,
+    action-types: (list 10 uint),
+    created-timestamp: uint,
+    results-count: uint,
+    query-status: bool
+  }
+)
+
+(define-data-var next-query-id uint u1)
 
 (define-public (report-adverse-event (trial-id uint) (participant principal) (severity uint) (description (string-ascii 200)))
   (let ((event-id (var-get next-event-id)))
@@ -85,6 +143,7 @@
     )
     
     (var-set next-event-id (+ event-id u1))
+    (unwrap! (create-audit-entry trial-id action-type-adverse-event-reported tx-sender (some event-id) none (some description) (some severity)) (err u210))
     (unwrap! (update-compliance-score trial-id)  (err u205))
     (ok event-id)
   )
@@ -99,6 +158,7 @@
       (merge event { resolved: true, resolution-date: (some stacks-block-height) })
     )
     
+    (unwrap! (create-audit-entry trial-id action-type-adverse-event-resolved tx-sender (some event-id) (some "unresolved") (some "resolved") none) (err u211))
     (unwrap! (update-compliance-score trial-id) (err u206))
     (ok true)
   )
@@ -123,6 +183,7 @@
     )
     
     (var-set next-deviation-id (+ deviation-id u1))
+    (unwrap! (create-audit-entry trial-id action-type-deviation-reported tx-sender (some deviation-id) none (some description) (some severity)) (err u212))
     (unwrap! (update-compliance-score trial-id) (err u207))
     (ok deviation-id)
   )
@@ -137,6 +198,7 @@
       (merge deviation { corrected: true, correction-date: (some stacks-block-height) })
     )
     
+    (unwrap! (create-audit-entry trial-id action-type-deviation-corrected tx-sender (some deviation-id) (some "uncorrected") (some "corrected") none) (err u213))
     (unwrap! (update-compliance-score trial-id) (err u208))
     (ok true)
   )
@@ -158,6 +220,7 @@
     )
     
     (var-set next-requirement-id (+ requirement-id u1))
+    (unwrap! (create-audit-entry trial-id action-type-requirement-created tx-sender (some requirement-id) none (some requirement-name) none) (err u214))
     (ok requirement-id)
   )
 )
@@ -171,6 +234,7 @@
       (merge requirement { completed: true, completion-date: (some stacks-block-height) })
     )
     
+    (unwrap! (create-audit-entry trial-id action-type-requirement-completed tx-sender (some requirement-id) (some "incomplete") (some "completed") none) (err u215))
     (unwrap! (update-compliance-score trial-id) (err u209))
     (ok true)
   )
@@ -253,6 +317,7 @@
         compliance-status: compliance-status
       }
     )
+    (unwrap! (create-audit-entry trial-id action-type-score-updated tx-sender none none none none) (err u216))
     (ok new-score)
   )
 )
@@ -286,5 +351,159 @@
   (match (map-get? compliance-scores { trial-id: trial-id })
     compliance-data (>= (get total-score compliance-data) min-compliance-score)
     true
+  )
+)
+
+(define-private (create-audit-entry (trial-id uint) (action-type uint) (actor principal) (target-entity-id (optional uint)) (previous-state (optional (string-ascii 500))) (new-state (optional (string-ascii 500))) (severity (optional uint)))
+  (let ((audit-id (var-get next-audit-id)))
+    (map-insert audit-trail
+      { audit-id: audit-id }
+      {
+        trial-id: trial-id,
+        action-type: action-type,
+        actor: actor,
+        target-entity-id: target-entity-id,
+        timestamp: stacks-block-height,
+        block-height: stacks-block-height,
+        previous-state: previous-state,
+        new-state: new-state,
+        reason: none,
+        severity: severity,
+        validated: false,
+        validator: none,
+        validation-timestamp: none
+      }
+    )
+    (var-set next-audit-id (+ audit-id u1))
+    (unwrap! (update-trial-audit-summary trial-id action-type) (err u217))
+    (ok audit-id)
+  )
+)
+
+(define-private (update-trial-audit-summary (trial-id uint) (action-type uint))
+  (let (
+    (current-summary (default-to 
+      { total-actions: u0, last-action-date: u0, last-compliance-change: u0, critical-actions-count: u0, validation-rate: u0, audit-score: u100 }
+      (map-get? trial-audit-summaries { trial-id: trial-id })
+    ))
+    (is-critical-action (or (is-eq action-type action-type-adverse-event-reported) (is-eq action-type action-type-deviation-reported)))
+    (is-compliance-action (or (is-eq action-type action-type-score-updated) (is-eq action-type action-type-compliance-changed)))
+  )
+    (map-set trial-audit-summaries
+      { trial-id: trial-id }
+      {
+        total-actions: (+ (get total-actions current-summary) u1),
+        last-action-date: stacks-block-height,
+        last-compliance-change: (if is-compliance-action stacks-block-height (get last-compliance-change current-summary)),
+        critical-actions-count: (+ (get critical-actions-count current-summary) (if is-critical-action u1 u0)),
+        validation-rate: (get validation-rate current-summary),
+        audit-score: (calculate-audit-score trial-id)
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-private (calculate-audit-score (trial-id uint))
+  (let (
+    (summary (default-to 
+      { total-actions: u0, last-action-date: u0, last-compliance-change: u0, critical-actions-count: u0, validation-rate: u0, audit-score: u100 }
+      (map-get? trial-audit-summaries { trial-id: trial-id })
+    ))
+    (base-score u100)
+    (critical-penalty (* (get critical-actions-count summary) u5))
+    (activity-bonus (if (> (get total-actions summary) u10) u10 u0))
+  )
+    (let ((score-after-penalty (if (> critical-penalty base-score) u0 (- base-score critical-penalty))))
+      (+ score-after-penalty activity-bonus)
+    )
+  )
+)
+
+(define-public (validate-audit-entry (audit-id uint) (validation-note (optional (string-ascii 200))))
+  (let ((audit-entry (unwrap! (map-get? audit-trail { audit-id: audit-id }) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (get validated audit-entry)) (err u218))
+    
+    (map-set audit-trail
+      { audit-id: audit-id }
+      (merge audit-entry {
+        validated: true,
+        validator: (some tx-sender),
+        validation-timestamp: (some stacks-block-height),
+        reason: validation-note
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (create-audit-query (trial-id uint) (query-type uint) (date-range-start uint) (date-range-end uint) (action-types (list 10 uint)))
+  (let ((query-id (var-get next-query-id)))
+    (map-insert audit-queries
+      { query-id: query-id }
+      {
+        trial-id: trial-id,
+        requester: tx-sender,
+        query-type: query-type,
+        date-range-start: date-range-start,
+        date-range-end: date-range-end,
+        action-types: action-types,
+        created-timestamp: stacks-block-height,
+        results-count: u0,
+        query-status: true
+      }
+    )
+    (var-set next-query-id (+ query-id u1))
+    (ok query-id)
+  )
+)
+
+(define-public (export-audit-trail (trial-id uint) (start-date uint) (end-date uint))
+  (begin
+    (asserts! (or (is-eq tx-sender contract-owner) (is-authorized-auditor tx-sender trial-id)) err-unauthorized)
+    (let ((query-id (unwrap! (create-audit-query trial-id u1 start-date end-date (list action-type-adverse-event-reported action-type-adverse-event-resolved action-type-deviation-reported action-type-deviation-corrected action-type-requirement-created action-type-requirement-completed action-type-score-updated action-type-compliance-changed)) (err u219))))
+      (ok query-id)
+    )
+  )
+)
+
+(define-private (is-authorized-auditor (auditor principal) (trial-id uint))
+  true
+)
+
+(define-read-only (get-audit-entry (audit-id uint))
+  (map-get? audit-trail { audit-id: audit-id })
+)
+
+(define-read-only (get-trial-audit-summary (trial-id uint))
+  (map-get? trial-audit-summaries { trial-id: trial-id })
+)
+
+(define-read-only (get-audit-query (query-id uint))
+  (map-get? audit-queries { query-id: query-id })
+)
+
+(define-read-only (get-latest-audit-entries (trial-id uint) (limit uint))
+  (begin
+    (asserts! (<= limit u50) (err u220))
+    (ok (var-get next-audit-id))
+  )
+)
+
+(define-read-only (verify-audit-integrity (trial-id uint))
+  (let (
+    (summary (get-trial-audit-summary trial-id))
+    (current-audit-id (var-get next-audit-id))
+  )
+    (match summary
+      summary-data (ok {
+        integrity-score: (get audit-score summary-data),
+        total-entries: (get total-actions summary-data),
+        validation-rate: (get validation-rate summary-data),
+        last-activity: (get last-action-date summary-data)
+      })
+      (ok { integrity-score: u100, total-entries: u0, validation-rate: u0, last-activity: u0 })
+    )
   )
 )
