@@ -1,0 +1,30 @@
+[project]
+name = 'clinical-trial'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.clinical-trial]
+path = 'contracts/clinical-trial.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.compliance-monitor]
+path = 'contracts/compliance-monitor.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.patient-anonymization]
+path = 'contracts/patient-anonymization.clar'
+clarity_version = 3
+epoch = 3.1
+
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
